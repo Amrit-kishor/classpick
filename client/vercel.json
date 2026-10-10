@@ -1,2 +1,2 @@
- "rewrites": [ { "source": "/api/:path*", "destination": "https://classpick-api.onrender.com/api/:path*" },
+{ "rewrites": [ { "source": "/api/:path*", "destination": "https://classpick-api.onrender.com/api/:path*" },
    { "source": "/(.*)", "destination": "/index.html" } ] }
