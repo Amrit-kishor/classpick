@@ -27,3 +27,7 @@ yarn-error.log*
 *.suo
 *.ntvs*
 *.njsproj
+
+# Archives & Temporary Bundles
+*.zip
+env_bundle/
