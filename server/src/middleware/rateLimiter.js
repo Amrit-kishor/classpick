@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 300,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again after 15 minutes.',
@@ -16,6 +17,7 @@ export const apiLimiter = rateLimit({
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 25,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     message: 'Too many authentication attempts, please try again in 15 minutes.',
@@ -27,7 +29,8 @@ export const authLimiter = rateLimit({
 // Limiter for student drawing to prevent rapid abusive double-clicks
 export const drawLimiter = rateLimit({
   windowMs: 2 * 1000, // 2 seconds
-  max: 3,
+  max: 10,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     message: 'Draw request in progress. Please wait for the current selection.',

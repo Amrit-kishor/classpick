@@ -2,25 +2,28 @@ import jwt from 'jsonwebtoken';
 import { Faculty } from '../models/Faculty.js';
 import { ENV } from '../config/env.js';
 
-// Generate token and configure HTTP-only cookie
+// Cookie options for secure session persistence
+export const getCookieOptions = () => ({
+  expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+  httpOnly: true, // Prevents JavaScript from reading session token
+  secure: ENV.COOKIE_SECURE, // True in production over HTTPS
+  sameSite: ENV.COOKIE_SAME_SITE, // 'none' for cross-domain HTTPS production; 'lax' for local dev
+  path: '/',
+});
+
+// Configure HTTP-only cookie and send faculty profile without exposing token to client JavaScript
 const sendTokenResponse = (faculty, statusCode, res) => {
   const token = jwt.sign({ id: faculty._id }, ENV.JWT_SECRET, {
     expiresIn: ENV.JWT_EXPIRES_IN,
   });
 
-  const cookieOptions = {
-    expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-    httpOnly: true,
-    secure: ENV.NODE_ENV === 'production',
-    sameSite: ENV.NODE_ENV === 'production' ? 'none' : 'lax',
-  };
+  const cookieOptions = getCookieOptions();
 
   res
     .status(statusCode)
     .cookie('token', token, cookieOptions)
     .json({
       success: true,
-      token,
       faculty: {
         id: faculty._id,
         name: faculty.name,
@@ -45,7 +48,15 @@ export const register = async (req, res, next) => {
       });
     }
 
-    const existingFaculty = await Faculty.findOne({ email: email.toLowerCase().trim() });
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long.',
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const existingFaculty = await Faculty.findOne({ email: normalizedEmail });
     if (existingFaculty) {
       return res.status(400).json({
         success: false,
@@ -54,11 +65,11 @@ export const register = async (req, res, next) => {
     }
 
     const faculty = await Faculty.create({
-      name,
-      email: email.toLowerCase().trim(),
+      name: name.trim(),
+      email: normalizedEmail,
       password,
-      department: department || 'Computer Science & Engineering',
-      designation: designation || 'Assistant Professor',
+      department: (department || 'Computer Science & Engineering').trim(),
+      designation: (designation || 'Assistant Professor').trim(),
     });
 
     sendTokenResponse(faculty, 201, res);
@@ -102,12 +113,14 @@ export const login = async (req, res, next) => {
   }
 };
 
-// @desc    Logout faculty / Clear cookie
+// @desc    Logout faculty / Clear cookie with matching path and options
 // @route   POST /api/auth/logout
 export const logout = async (req, res) => {
-  res.cookie('token', 'none', {
-    expires: new Date(Date.now() + 5 * 1000),
+  res.clearCookie('token', {
     httpOnly: true,
+    secure: ENV.COOKIE_SECURE,
+    sameSite: ENV.COOKIE_SAME_SITE,
+    path: '/',
   });
 
   res.status(200).json({
@@ -121,6 +134,13 @@ export const logout = async (req, res) => {
 export const getMe = async (req, res, next) => {
   try {
     const faculty = await Faculty.findById(req.faculty.id);
+    if (!faculty) {
+      return res.status(404).json({
+        success: false,
+        message: 'Faculty account not found.',
+      });
+    }
+
     res.status(200).json({
       success: true,
       faculty: {
@@ -144,9 +164,16 @@ export const updateProfile = async (req, res, next) => {
     const { name, department, designation } = req.body;
     const faculty = await Faculty.findById(req.faculty.id);
 
-    if (name) faculty.name = name;
-    if (department) faculty.department = department;
-    if (designation) faculty.designation = designation;
+    if (!faculty) {
+      return res.status(404).json({
+        success: false,
+        message: 'Faculty account not found.',
+      });
+    }
+
+    if (name) faculty.name = name.trim();
+    if (department) faculty.department = department.trim();
+    if (designation) faculty.designation = designation.trim();
 
     await faculty.save();
 

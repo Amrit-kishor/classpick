@@ -17,6 +17,7 @@ router.use(protect);
 router.get('/classrooms/:classroomId/selection/status', getSelectionStatus);
 router.post('/classrooms/:classroomId/selection/draw', drawLimiter, drawStudent);
 router.post('/classrooms/:classroomId/selection/reset-round', resetRound);
+router.post('/classrooms/:classroomId/selection/reset', resetRound);
 
 // Global selection history routes for faculty
 router.get('/selection/history', getSelectionHistory);

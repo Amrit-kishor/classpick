@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Student } from '../models/Student.js';
 import { Classroom } from '../models/Classroom.js';
 import { SelectionRound } from '../models/SelectionRound.js';
@@ -5,6 +6,9 @@ import { parseStudentCSV, generateStudentCSV } from '../utils/csvHelper.js';
 
 // Verify classroom belongs to faculty
 const verifyClassroomOwnership = async (classroomId, facultyId) => {
+  if (!mongoose.isValidObjectId(classroomId)) {
+    return null;
+  }
   return await Classroom.findOne({ _id: classroomId, faculty: facultyId });
 };
 
@@ -101,7 +105,7 @@ export const createStudent = async (req, res, next) => {
       faculty: req.faculty._id,
       fullName: fullName.trim(),
       rollNumber: normalizedRoll,
-      profileImage: profileImage || '',
+      profileImage: (profileImage || '').trim(),
       isActive: isActive !== undefined ? Boolean(isActive) : true,
     });
 
@@ -119,6 +123,10 @@ export const createStudent = async (req, res, next) => {
 export const updateStudent = async (req, res, next) => {
   try {
     const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid student identifier.' });
+    }
+
     const { fullName, rollNumber, profileImage, isActive } = req.body;
 
     const student = await Student.findOne({ _id: id, faculty: req.faculty._id });
@@ -149,7 +157,7 @@ export const updateStudent = async (req, res, next) => {
     }
 
     if (fullName) student.fullName = fullName.trim();
-    if (profileImage !== undefined) student.profileImage = profileImage;
+    if (profileImage !== undefined) student.profileImage = profileImage.trim();
     if (isActive !== undefined) student.isActive = Boolean(isActive);
 
     await student.save();
@@ -168,6 +176,10 @@ export const updateStudent = async (req, res, next) => {
 export const deleteStudent = async (req, res, next) => {
   try {
     const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid student identifier.' });
+    }
+
     const student = await Student.findOne({ _id: id, faculty: req.faculty._id });
 
     if (!student) {

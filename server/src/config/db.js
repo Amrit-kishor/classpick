@@ -5,35 +5,48 @@ import { ENV } from './env.js';
 let mongodInstance = null;
 
 export const connectDB = async () => {
-  try {
-    let uri = ENV.MONGODB_URI;
+  let uri = ENV.MONGODB_URI;
 
-    if (!uri) {
-      console.log('⚡ No external MONGODB_URI provided. Initializing in-memory MongoDB instance...');
-      mongodInstance = await MongoMemoryServer.create();
-      uri = mongodInstance.getUri();
-      console.log(`✅ In-memory MongoDB started at: ${uri}`);
+  if (!uri) {
+    if (ENV.NODE_ENV === 'production' || !ENV.ALLOW_IN_MEMORY_DB) {
+      throw new Error(
+        'FATAL: MONGODB_URI is required in production. In-memory database fallback is strictly disabled.'
+      );
     }
 
-    const conn = await mongoose.connect(uri, {
-      autoIndex: true,
-    });
-
-    console.log(`🚀 MongoDB Connected: ${conn.connection.host}`);
-    return conn;
-  } catch (error) {
-    console.error(`❌ MongoDB Connection Error: ${error.message}`);
-    process.exit(1);
+    console.log('⚡ No external MONGODB_URI provided. Initializing in-memory MongoDB instance for development/testing...');
+    mongodInstance = await MongoMemoryServer.create();
+    uri = mongodInstance.getUri();
+    console.log(`✅ In-memory MongoDB running at: ${uri}`);
   }
+
+  const conn = await mongoose.connect(uri, {
+    autoIndex: true,
+    serverSelectionTimeoutMS: 8000,
+  });
+
+  mongoose.connection.on('error', (err) => {
+    console.error(`❌ MongoDB Runtime Connection Error: ${err.message}`);
+  });
+
+  mongoose.connection.on('disconnected', () => {
+    console.warn('⚠️ MongoDB disconnected.');
+  });
+
+  console.log(`🚀 MongoDB Connected: ${conn.connection.host}`);
+  return conn;
 };
 
 export const closeDB = async () => {
   try {
-    await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
+    }
     if (mongodInstance) {
       await mongodInstance.stop();
+      mongodInstance = null;
     }
   } catch (error) {
-    console.error('Error closing database:', error);
+    console.error('Error closing database connection:', error.message);
   }
 };

@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Classroom } from '../models/Classroom.js';
 import { Student } from '../models/Student.js';
 import { SelectionRound } from '../models/SelectionRound.js';
@@ -6,6 +7,9 @@ import { pickRandomItem, shuffleArray } from '../utils/randomPicker.js';
 
 // Verify classroom belongs to faculty
 const verifyClassroom = async (classroomId, facultyId) => {
+  if (!mongoose.isValidObjectId(classroomId)) {
+    return null;
+  }
   return await Classroom.findOne({ _id: classroomId, faculty: facultyId });
 };
 
@@ -37,16 +41,22 @@ export const getSelectionStatus = async (req, res, next) => {
       const activeIds = activeStudents.map((s) => s._id);
       const shuffledIds = shuffleArray(activeIds);
 
-      round = await SelectionRound.create({
-        classroom: classroomId,
-        faculty: req.faculty._id,
-        roundNumber: 1,
-        totalEligible: activeStudents.length,
-        remainingStudentIds: shuffledIds,
-        selectedStudentIds: [],
-        lastSelectedStudent: null,
-        isCompleted: false,
-      });
+      round = await SelectionRound.findOneAndUpdate(
+        { classroom: classroomId },
+        {
+          $setOnInsert: {
+            classroom: classroomId,
+            faculty: req.faculty._id,
+            roundNumber: 1,
+            totalEligible: activeStudents.length,
+            remainingStudentIds: shuffledIds,
+            selectedStudentIds: [],
+            lastSelectedStudent: null,
+            isCompleted: false,
+          },
+        },
+        { upsert: true, new: true }
+      );
     }
 
     res.status(200).json({
@@ -114,79 +124,132 @@ export const drawStudent = async (req, res, next) => {
 
     if (mode === 'random') {
       // UNBIASED RANDOM MODE:
-      // Independent probability for every active student. Can be picked again.
+      // Independent probability for every active student with replacement.
       selectedStudentDoc = pickRandomItem(activeStudents);
 
-      // Get or maintain existing round doc for context
       const currentRound = await SelectionRound.findOne({ classroom: classroomId });
       if (currentRound) {
         roundNumber = currentRound.roundNumber;
       }
     } else if (mode === 'fair_round') {
       // FAIR ROUND MODE:
-      // Without replacement within current round until all students picked.
-      let round = await SelectionRound.findOne({ classroom: classroomId });
+      // Atomic selection without replacement. Concurrent-safe across simultaneous requests.
+      let claimedStudentDoc = null;
+      let roundDoc = null;
+      const maxAttempts = 10;
+      let attempts = 0;
 
-      if (!round) {
-        const activeIds = activeStudents.map((s) => s._id);
-        const shuffled = shuffleArray(activeIds);
-        round = await SelectionRound.create({
-          classroom: classroomId,
-          faculty: req.faculty._id,
-          roundNumber: 1,
-          totalEligible: activeStudents.length,
-          remainingStudentIds: shuffled,
-          selectedStudentIds: [],
-          lastSelectedStudent: null,
-          isCompleted: false,
-        });
-      }
+      while (attempts < maxAttempts && !claimedStudentDoc) {
+        attempts++;
 
-      // Check if all students in round have already been selected
-      if (round.remainingStudentIds.length === 0 || round.isCompleted) {
-        return res.status(400).json({
-          success: false,
-          isRoundCompleted: true,
-          message: 'All students have been selected in this round! Please reset or start a fresh round.',
-          roundNumber: round.roundNumber,
-        });
-      }
+        roundDoc = await SelectionRound.findOne({ classroom: classroomId });
 
-      // Pick the next student from shuffled remaining list
-      const chosenStudentId = round.remainingStudentIds[0];
-      selectedStudentDoc = activeStudents.find(
-        (s) => s._id.toString() === chosenStudentId.toString()
-      );
+        if (!roundDoc) {
+          const activeIds = activeStudents.map((s) => s._id);
+          const shuffled = shuffleArray(activeIds);
+          try {
+            roundDoc = await SelectionRound.findOneAndUpdate(
+              { classroom: classroomId },
+              {
+                $setOnInsert: {
+                  classroom: classroomId,
+                  faculty: req.faculty._id,
+                  roundNumber: 1,
+                  totalEligible: activeStudents.length,
+                  remainingStudentIds: shuffled,
+                  selectedStudentIds: [],
+                  lastSelectedStudent: null,
+                  isCompleted: false,
+                },
+              },
+              { upsert: true, new: true }
+            );
+          } catch (e) {
+            roundDoc = await SelectionRound.findOne({ classroom: classroomId });
+          }
+        }
 
-      // If student was deleted or deactivated since round began, filter and retry
-      if (!selectedStudentDoc) {
-        round.remainingStudentIds = round.remainingStudentIds.filter(
-          (id) => id.toString() !== chosenStudentId.toString()
+        // Check if round is already finished
+        if (roundDoc.isCompleted || roundDoc.remainingStudentIds.length === 0) {
+          return res.status(400).json({
+            success: false,
+            isRoundCompleted: true,
+            message: 'All students have been selected in this round! Please reset or start a fresh round.',
+            roundNumber: roundDoc.roundNumber,
+          });
+        }
+
+        // Target the next candidate from the shuffled remaining list
+        const candidateId = roundDoc.remainingStudentIds[0];
+
+        // Ensure candidate still belongs to active students
+        const candidateDoc = activeStudents.find(
+          (s) => s._id.toString() === candidateId.toString()
         );
-        await round.save();
+
+        if (!candidateDoc) {
+          // Candidate student was deleted or deactivated mid-round:
+          // Atomically prune from remainingStudentIds
+          await SelectionRound.updateOne(
+            { _id: roundDoc._id },
+            { $pull: { remainingStudentIds: candidateId } }
+          );
+          continue; // Retry with next student
+        }
+
+        // ATOMIC CLAIM:
+        // Pull candidateId and push to selectedStudentIds in a single atomic database operation.
+        // If another concurrent request claimed candidateId first, this update will match 0 documents.
+        const updatedRound = await SelectionRound.findOneAndUpdate(
+          {
+            _id: roundDoc._id,
+            roundNumber: roundDoc.roundNumber,
+            isCompleted: false,
+            remainingStudentIds: candidateId,
+          },
+          {
+            $pull: { remainingStudentIds: candidateId },
+            $push: { selectedStudentIds: candidateId },
+            $set: { lastSelectedStudent: candidateId },
+          },
+          { new: true }
+        );
+
+        if (updatedRound) {
+          // Claim succeeded!
+          claimedStudentDoc = candidateDoc;
+          roundDoc = updatedRound;
+
+          // Check if round reached exhaustion
+          if (roundDoc.remainingStudentIds.length === 0 && !roundDoc.isCompleted) {
+            await SelectionRound.updateOne(
+              { _id: roundDoc._id, isCompleted: false },
+              { $set: { isCompleted: true } }
+            );
+            roundDoc.isCompleted = true;
+          }
+          break;
+        }
+
+        // Atomic update returned null: another request claimed candidateId concurrently.
+        // Loop around to atomically attempt the new head of remainingStudentIds.
+      }
+
+      if (!claimedStudentDoc) {
         return res.status(409).json({
           success: false,
-          message: 'Roster changed during round. Please retry selection.',
+          message: 'Concurrent selection conflict. Please retry your draw.',
         });
       }
 
-      // Update round state atomically
-      round.remainingStudentIds.shift();
-      round.selectedStudentIds.push(selectedStudentDoc._id);
-      round.lastSelectedStudent = selectedStudentDoc._id;
-      if (round.remainingStudentIds.length === 0) {
-        round.isCompleted = true;
-      }
-
-      await round.save();
-
-      roundNumber = round.roundNumber;
+      selectedStudentDoc = claimedStudentDoc;
+      roundNumber = roundDoc.roundNumber;
       roundInfo = {
-        roundNumber: round.roundNumber,
-        totalEligible: round.totalEligible,
-        remainingCount: round.remainingStudentIds.length,
-        selectedCount: round.selectedStudentIds.length,
-        isCompleted: round.isCompleted,
+        roundNumber: roundDoc.roundNumber,
+        totalEligible: roundDoc.totalEligible,
+        remainingCount: roundDoc.remainingStudentIds.length,
+        selectedCount: roundDoc.selectedStudentIds.length,
+        isCompleted: roundDoc.isCompleted,
       };
     } else {
       return res.status(400).json({
@@ -257,13 +320,15 @@ export const resetRound = async (req, res, next) => {
     round = await SelectionRound.findOneAndUpdate(
       { classroom: classroomId },
       {
-        faculty: req.faculty._id,
-        roundNumber: nextRoundNumber,
-        totalEligible: activeStudents.length,
-        remainingStudentIds: shuffledIds,
-        selectedStudentIds: [],
-        lastSelectedStudent: null,
-        isCompleted: false,
+        $set: {
+          faculty: req.faculty._id,
+          roundNumber: nextRoundNumber,
+          totalEligible: activeStudents.length,
+          remainingStudentIds: shuffledIds,
+          selectedStudentIds: [],
+          lastSelectedStudent: null,
+          isCompleted: false,
+        },
       },
       { upsert: true, new: true }
     );
@@ -293,17 +358,27 @@ export const getSelectionHistory = async (req, res, next) => {
     let query = { faculty: req.faculty._id };
 
     if (classroomId) {
+      if (!mongoose.isValidObjectId(classroomId)) {
+        return res.status(400).json({ success: false, message: 'Invalid classroom identifier.' });
+      }
       query.classroom = classroomId;
     }
 
     if (mode) {
+      if (!['random', 'fair_round'].includes(mode)) {
+        return res.status(400).json({ success: false, message: 'Invalid mode filter.' });
+      }
       query.mode = mode;
     }
 
     if (date) {
-      const startOfDay = new Date(date);
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid date parameter.' });
+      }
+      const startOfDay = new Date(parsedDate);
       startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(date);
+      const endOfDay = new Date(parsedDate);
       endOfDay.setHours(23, 59, 59, 999);
       query.selectedAt = { $gte: startOfDay, $lte: endOfDay };
     }
@@ -339,6 +414,9 @@ export const clearSelectionHistory = async (req, res, next) => {
 
     let query = { faculty: req.faculty._id };
     if (classroomId) {
+      if (!mongoose.isValidObjectId(classroomId)) {
+        return res.status(400).json({ success: false, message: 'Invalid classroom identifier.' });
+      }
       query.classroom = classroomId;
     }
 

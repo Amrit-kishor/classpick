@@ -1,6 +1,9 @@
+import { ENV } from '../config/env.js';
+
 export const errorHandler = (err, req, res, next) => {
   let error = { ...err };
   error.message = err.message;
+  const statusCode = error.statusCode || err.status || 500;
 
   // Log error safely without leaking sensitive information
   console.error(`[API Error] ${req.method} ${req.url}:`, err.message);
@@ -42,8 +45,13 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  res.status(error.statusCode || 500).json({
+  // In production, avoid leaking internal exception details for 500 errors
+  const clientMessage = (statusCode === 500 && ENV.NODE_ENV === 'production')
+    ? 'Internal Server Error. Please try again later.'
+    : (error.message || 'Internal Server Error');
+
+  res.status(statusCode).json({
     success: false,
-    message: error.message || 'Internal Server Error',
+    message: clientMessage,
   });
 };

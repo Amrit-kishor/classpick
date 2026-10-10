@@ -1,15 +1,44 @@
 import { Faculty } from '../models/Faculty.js';
 import { Classroom } from '../models/Classroom.js';
 import { Student } from '../models/Student.js';
+import { ENV } from '../config/env.js';
 
-export const seedInitialData = async () => {
+/**
+ * Checks for demo accounts in production to advise administrators without deleting them automatically.
+ */
+export const auditDemoAccounts = async () => {
+  try {
+    const demo = await Faculty.findOne({ email: 'dr.sharma@college.edu' });
+    if (demo && ENV.NODE_ENV === 'production') {
+      console.warn('⚠️  [SECURITY WARNING] Demo account "dr.sharma@college.edu" exists in production database. Administrators should review and remove this account.');
+    }
+  } catch (error) {
+    // Audit failure should not crash application
+  }
+};
+
+/**
+ * Seeds sample faculty, classrooms, and students for local development testing only.
+ * Strictly disabled in production.
+ */
+export const seedInitialData = async (forceManual = false) => {
+  // Never seed demo accounts in production
+  if (ENV.NODE_ENV === 'production' && !forceManual) {
+    return;
+  }
+
+  // In non-production, only seed if explicitly configured
+  if (!ENV.SEED_DEMO_DATA && !forceManual) {
+    return;
+  }
+
   try {
     const facultyCount = await Faculty.countDocuments();
     if (facultyCount > 0) {
-      return; // Already initialized
+      return; // Never overwrite or duplicate existing user data
     }
 
-    console.log('🌱 Seeding sample faculty and classroom for demonstration...');
+    console.log('🌱 Seeding development demo faculty and classroom...');
 
     // 1. Create demo faculty
     const demoFaculty = await Faculty.create({
@@ -75,17 +104,17 @@ export const seedInitialData = async () => {
 
     await Student.insertMany(studentDocs);
 
-    // Also add a couple students to second classroom
     await Student.insertMany([
       { classroom: secondClassroom._id, faculty: demoFaculty._id, fullName: 'Arjun Das', rollNumber: 'CS-B01', isActive: true },
       { classroom: secondClassroom._id, faculty: demoFaculty._id, fullName: 'Bhavna Bose', rollNumber: 'CS-B02', isActive: true },
       { classroom: secondClassroom._id, faculty: demoFaculty._id, fullName: 'Chirag Seth', rollNumber: 'CS-B03', isActive: true },
     ]);
 
-    console.log('✅ Demo data seeded successfully:');
-    console.log('   Faculty Email: dr.sharma@college.edu');
-    console.log('   Password:      faculty1234');
+    console.log('✅ Development demo data seeded successfully.');
   } catch (error) {
     console.error('Error seeding data:', error.message);
   }
 };
+
+export const seedDemoData = seedInitialData;
+

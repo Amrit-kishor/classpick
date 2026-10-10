@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Classroom } from '../models/Classroom.js';
 import { Student } from '../models/Student.js';
 import { SelectionRound } from '../models/SelectionRound.js';
@@ -58,8 +59,13 @@ export const getClassrooms = async (req, res, next) => {
 // @route   GET /api/classrooms/:id
 export const getClassroomById = async (req, res, next) => {
   try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid classroom identifier.' });
+    }
+
     const classroom = await Classroom.findOne({
-      _id: req.params.id,
+      _id: id,
       faculty: req.faculty._id,
     });
 
@@ -107,11 +113,11 @@ export const createClassroom = async (req, res, next) => {
     }
 
     const classroom = await Classroom.create({
-      name,
-      department,
-      academicYear,
-      section,
-      subject,
+      name: name.trim(),
+      department: department.trim(),
+      academicYear: academicYear.trim(),
+      section: section.trim(),
+      subject: subject.trim(),
       faculty: req.faculty._id,
     });
 
@@ -128,10 +134,15 @@ export const createClassroom = async (req, res, next) => {
 // @route   PUT /api/classrooms/:id
 export const updateClassroom = async (req, res, next) => {
   try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid classroom identifier.' });
+    }
+
     const { name, department, academicYear, section, subject } = req.body;
 
     let classroom = await Classroom.findOne({
-      _id: req.params.id,
+      _id: id,
       faculty: req.faculty._id,
     });
 
@@ -142,11 +153,11 @@ export const updateClassroom = async (req, res, next) => {
       });
     }
 
-    classroom.name = name ?? classroom.name;
-    classroom.department = department ?? classroom.department;
-    classroom.academicYear = academicYear ?? classroom.academicYear;
-    classroom.section = section ?? classroom.section;
-    classroom.subject = subject ?? classroom.subject;
+    if (name) classroom.name = name.trim();
+    if (department) classroom.department = department.trim();
+    if (academicYear) classroom.academicYear = academicYear.trim();
+    if (section) classroom.section = section.trim();
+    if (subject) classroom.subject = subject.trim();
 
     await classroom.save();
 
@@ -163,8 +174,13 @@ export const updateClassroom = async (req, res, next) => {
 // @route   DELETE /api/classrooms/:id
 export const deleteClassroom = async (req, res, next) => {
   try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid classroom identifier.' });
+    }
+
     const classroom = await Classroom.findOne({
-      _id: req.params.id,
+      _id: id,
       faculty: req.faculty._id,
     });
 

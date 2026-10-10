@@ -43,7 +43,7 @@ test('API Integration - Health check returns healthy', async () => {
   assert.equal(data.status, 'healthy');
 });
 
-test('API Integration - Faculty Registration and Auth Flow', async () => {
+test('API Integration - Faculty Registration and Auth Flow with HTTP-only cookies', async () => {
   const testEmail = `prof.test_${Date.now()}@college.edu`;
   const regRes = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST',
@@ -58,8 +58,13 @@ test('API Integration - Faculty Registration and Auth Flow', async () => {
 
   const regData = await regRes.json();
   assert.equal(regRes.status, 201);
-  assert.ok(regData.token);
+  assert.equal(regData.token, undefined, 'JWT token must not be exposed in JSON body');
   assert.equal(regData.faculty.name, 'Professor Test');
+
+  const regCookie = regRes.headers.get('set-cookie');
+  assert.ok(regCookie, 'set-cookie header must be present on register');
+  assert.ok(regCookie.includes('token='), 'set-cookie must set token cookie');
+  assert.ok(regCookie.toLowerCase().includes('httponly'), 'cookie must be HttpOnly');
 
   // Login
   const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
@@ -73,13 +78,33 @@ test('API Integration - Faculty Registration and Auth Flow', async () => {
 
   const loginData = await loginRes.json();
   assert.equal(loginRes.status, 200);
-  assert.ok(loginData.token);
+  assert.equal(loginData.token, undefined, 'JWT token must not be exposed in JSON body');
+  assert.equal(loginData.faculty.email, testEmail);
 
-  // Authenticated route GET /api/auth/me
+  const loginCookie = loginRes.headers.get('set-cookie');
+  assert.ok(loginCookie, 'set-cookie header must be present on login');
+  assert.ok(loginCookie.includes('token='));
+
+  // Authenticated route GET /api/auth/me using Cookie
   const meRes = await fetch(`${baseUrl}/api/auth/me`, {
-    headers: { Authorization: `Bearer ${loginData.token}` },
+    headers: {
+      Cookie: loginCookie.split(';')[0],
+    },
   });
   const meData = await meRes.json();
   assert.equal(meRes.status, 200);
   assert.equal(meData.faculty.email, testEmail);
+
+  // Logout clears the cookie
+  const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+    method: 'POST',
+    headers: {
+      Cookie: loginCookie.split(';')[0],
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+  });
+  assert.equal(logoutRes.status, 200);
+  const logoutCookie = logoutRes.headers.get('set-cookie');
+  assert.ok(logoutCookie, 'set-cookie header must be present on logout');
+  assert.ok(logoutCookie.includes('token=;'));
 });
