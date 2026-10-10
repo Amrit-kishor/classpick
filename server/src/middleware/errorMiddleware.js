@@ -5,8 +5,14 @@ export const errorHandler = (err, req, res, next) => {
   error.message = err.message;
   const statusCode = error.statusCode || err.status || 500;
 
-  // Log error safely without leaking sensitive information
-  console.error(`[API Error] ${req.method} ${req.url}:`, err.message);
+  // Log error safely without leaking sensitive information (passwords, tokens, or connection strings)
+  const errCodeStr = err.code !== undefined ? ` [Code: ${err.code}]` : '';
+  const errNameStr = err.name ? ` [${err.name}]` : '';
+  const safeMessage = (err.message || 'Unknown error').replace(
+    /mongodb(\+srv)?:\/\/[^@\s]+@/gi,
+    'mongodb$1://<credentials-hidden>@'
+  );
+  console.error(`[API Error] ${req.method} ${req.url}:${errNameStr}${errCodeStr}`, safeMessage);
 
   // Mongoose duplicate key (E11000)
   if (err.code === 11000) {
