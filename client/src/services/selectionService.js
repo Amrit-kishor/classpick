@@ -6,8 +6,8 @@ export const selectionService = {
     return res.data;
   },
 
-  async drawStudent(classroomId, mode = 'random') {
-    const res = await api.post(`/classrooms/${classroomId}/selection/draw`, { mode });
+  async drawStudent(classroomId, mode = 'random', config = {}) {
+    const res = await api.post(`/classrooms/${classroomId}/selection/draw`, { mode }, config);
     return res.data;
   },
 

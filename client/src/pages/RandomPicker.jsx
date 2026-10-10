@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Dices,
   RotateCcw,
@@ -18,7 +18,16 @@ import { PollAnimationStage } from '../components/PollAnimationStage';
 import { useSound } from '../context/SoundContext';
 
 export const RandomPicker = ({ initialClassroomId }) => {
-  const { soundEnabled, toggleSound, volume, setVolume, stopPollingAudio } = useSound();
+  const {
+    soundEnabled,
+    toggleSound,
+    volume,
+    setVolume,
+    startPollingAudio,
+    stopPollingAudio,
+    playSuccessChime,
+    playErrorSound,
+  } = useSound();
 
   const [classrooms, setClassrooms] = useState([]);
   const [selectedClassroomId, setSelectedClassroomId] = useState(initialClassroomId || '');
@@ -26,12 +35,31 @@ export const RandomPicker = ({ initialClassroomId }) => {
   const [students, setStudents] = useState([]);
   const [roundState, setRoundState] = useState(null);
 
-  // Selection state
+  // Robust Selection Lifecycle: 'idle' | 'polling' | 'selected' | 'error' | 'cancelled'
   const [mode, setMode] = useState('random'); // 'random' | 'fair_round'
-  const [isPolling, setIsPolling] = useState(false);
+  const [selectionStatus, setSelectionStatus] = useState('idle');
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [error, setError] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const isPolling = selectionStatus === 'polling';
+  const currentRequestIdRef = useRef(0);
+  const minSuspenseTimerRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  // Guarantee clean shutdown of timers and audio on unmount
+  useEffect(() => {
+    return () => {
+      currentRequestIdRef.current++;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (minSuspenseTimerRef.current) {
+        clearTimeout(minSuspenseTimerRef.current);
+      }
+      stopPollingAudio();
+    };
+  }, [stopPollingAudio]);
 
   // Load classrooms on mount
   useEffect(() => {
@@ -66,6 +94,7 @@ export const RandomPicker = ({ initialClassroomId }) => {
       setRoundState(res.round);
       if (res.round?.lastSelectedStudent && !selectedStudent) {
         setSelectedStudent(res.round.lastSelectedStudent);
+        setSelectionStatus('selected');
       }
       setError(null);
     } catch (err) {
@@ -78,53 +107,122 @@ export const RandomPicker = ({ initialClassroomId }) => {
     loadClassroomStatus();
   }, [loadClassroomStatus]);
 
-  // Handle Pick a Student
+  // Handle Pick a Student with robust lifecycle and exact audio synchronization
   const handleDraw = async () => {
-    if (isPolling) return; // Prevent double-clicking
+    if (selectionStatus === 'polling') return; // Strict lock against rapid double-clicks
     if (students.length === 0) {
+      setSelectionStatus('error');
       setError('Cannot pick: No active students in this classroom roster.');
       return;
     }
 
     if (mode === 'fair_round' && roundState?.isCompleted) {
+      setSelectionStatus('error');
       setError('All students have been selected in this round! Please click "Reset Round" to start a fresh cycle.');
       return;
     }
 
+    // Cancel previous pending timers or inflight abort controllers
+    if (minSuspenseTimerRef.current) {
+      clearTimeout(minSuspenseTimerRef.current);
+      minSuspenseTimerRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    const requestId = ++currentRequestIdRef.current;
     setError(null);
-    setIsPolling(true);
+    setSelectedStudent(null);
+    setSelectionStatus('polling');
+
+    // 1. Start electronic startup tone and suspense loop immediately
+    startPollingAudio();
 
     try {
-      // Backend validates and cryptographically determines the official selection
-      const res = await selectionService.drawStudent(selectedClassroomId, mode);
+      // 2. Minimum visual suspense duration so user sees animation even on fast LAN/localhost
+      const minSuspensePromise = new Promise((resolve) => {
+        minSuspenseTimerRef.current = setTimeout(resolve, 1800);
+      });
 
-      // We wait for the suspense animation (handled gracefully in PollAnimationStage)
-      setTimeout(() => {
-        setSelectedStudent(res.selectedStudent);
-        if (res.roundInfo) {
-          setRoundState((prev) => ({
-            ...prev,
-            ...res.roundInfo,
-          }));
-        }
-        setIsPolling(false);
-      }, 2200);
-    } catch (err) {
+      // 3. Authoritative cryptographic backend selection call
+      const apiPromise = selectionService.drawStudent(selectedClassroomId, mode, {
+        signal: abortController.signal,
+      });
+
+      // 4. Await BOTH: does NOT assume API completed at a fixed timeout.
+      // If network takes 3s, suspense audio continues playing until API finishes!
+      const [_, res] = await Promise.all([minSuspensePromise, apiPromise]);
+
+      // If user cancelled, classroom changed, or newer request fired, discard
+      if (requestId !== currentRequestIdRef.current) return;
+
+      if (!res || !res.selectedStudent) {
+        throw new Error('Invalid selection response from server.');
+      }
+
+      // 5. Commit authoritative state
+      setSelectedStudent(res.selectedStudent);
+      if (res.roundInfo) {
+        setRoundState((prev) => ({
+          ...prev,
+          ...res.roundInfo,
+        }));
+      }
+      setSelectionStatus('selected');
+
+      // 6. Stop suspense audio immediately and play confirmation chime exactly once
       stopPollingAudio();
-      setTimeout(() => {
-        setIsPolling(false);
-        setError(err.message);
-      }, 300);
+      playSuccessChime();
+    } catch (err) {
+      if (requestId !== currentRequestIdRef.current) return;
+      if (err.name === 'CanceledError' || err.name === 'AbortError') return;
+
+      stopPollingAudio();
+      playErrorSound();
+      setSelectionStatus('error');
+      setError(err.message || 'Selection failed. Please try again.');
     }
+  };
+
+  // Handle Explicit Cancellation
+  const handleCancel = () => {
+    if (selectionStatus !== 'polling') return;
+    currentRequestIdRef.current++;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    if (minSuspenseTimerRef.current) {
+      clearTimeout(minSuspenseTimerRef.current);
+      minSuspenseTimerRef.current = null;
+    }
+    stopPollingAudio();
+    setSelectionStatus('cancelled');
+    setError(null);
+  };
+
+  // Handle Classroom Change
+  const handleClassroomChange = (newId) => {
+    if (selectionStatus === 'polling') {
+      handleCancel();
+    }
+    setSelectedClassroomId(newId);
+    setSelectedStudent(null);
+    setSelectionStatus('idle');
+    setError(null);
   };
 
   // Handle Reset Round for Fair Round Mode
   const handleResetRound = async () => {
+    handleCancel();
     stopPollingAudio();
     try {
       const res = await selectionService.resetRound(selectedClassroomId);
       setRoundState(res.round);
       setSelectedStudent(null);
+      setSelectionStatus('idle');
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -171,10 +269,7 @@ export const RandomPicker = ({ initialClassroomId }) => {
               <div className="relative mt-0.5">
                 <select
                   value={selectedClassroomId}
-                  onChange={(e) => {
-                    setSelectedClassroomId(e.target.value);
-                    setSelectedStudent(null);
-                  }}
+                  onChange={(e) => handleClassroomChange(e.target.value)}
                   disabled={isPolling}
                   className="appearance-none pr-8 py-1 bg-transparent font-bold text-base text-slate-900 dark:text-white focus:outline-none cursor-pointer"
                 >
@@ -355,11 +450,13 @@ export const RandomPicker = ({ initialClassroomId }) => {
 
       {/* CORE ANIMATION & SELECTION STAGE */}
       <PollAnimationStage
+        status={selectionStatus}
         isPolling={isPolling}
         selectedStudent={selectedStudent}
         candidateStudents={students}
         error={error}
         onRetry={handleDraw}
+        onCancel={handleCancel}
         classroomName={classroomData?.name || currentClassroom?.name}
       />
 
@@ -380,6 +477,17 @@ export const RandomPicker = ({ initialClassroomId }) => {
           <Dices className={`w-5 h-5 ${isPolling ? 'animate-spin' : ''}`} />
           <span>{isPolling ? 'Selecting Student...' : 'Pick a Student'}</span>
         </button>
+
+        {isPolling && (
+          <button
+            onClick={handleCancel}
+            id="btn-cancel-selection"
+            type="button"
+            className="w-full sm:w-auto px-6 py-4 rounded-2xl text-sm font-bold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-all shadow-sm"
+          >
+            Cancel Selection
+          </button>
+        )}
 
         {mode === 'fair_round' && roundState?.isCompleted && (
           <button

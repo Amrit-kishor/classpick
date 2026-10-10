@@ -120,3 +120,66 @@ test('Security - Demo Seeding is strictly prevented during production startup', 
 
   ENV.NODE_ENV = originalEnv;
 });
+
+test('Security - Rejects missing, malformed, or expired tokens with 401', async () => {
+  // 1. Missing token
+  const noTokenRes = await fetch(`${baseUrl}/api/auth/me`);
+  assert.equal(noTokenRes.status, 401);
+
+  // 2. Malformed token
+  const malformedRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Authorization: 'Bearer this-is-not-a-valid-jwt-token' },
+  });
+  assert.equal(malformedRes.status, 401);
+
+  // 3. Expired token
+  const expiredToken = jwt.sign({ id: facultyA._id }, ENV.JWT_SECRET, { expiresIn: '1ms' });
+  await new Promise((r) => setTimeout(r, 10)); // wait for expiry
+  const expiredRes = await fetch(`${baseUrl}/api/auth/me`, {
+    headers: { Authorization: `Bearer ${expiredToken}` },
+  });
+  assert.equal(expiredRes.status, 401);
+});
+
+test('Security - CSRF header is strictly enforced for cookie requests in production', async () => {
+  const originalEnv = ENV.NODE_ENV;
+  ENV.NODE_ENV = 'production';
+
+  // Request with Cookie auth but WITHOUT X-Requested-With header
+  const csrfBlockedRes = await fetch(`${baseUrl}/api/classrooms`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: `token=${tokenA}`,
+    },
+    body: JSON.stringify({
+      name: 'CSRF Attack Classroom',
+      subject: 'Security',
+      department: 'CS',
+      section: 'A',
+    }),
+  });
+
+  assert.equal(csrfBlockedRes.status, 403, 'Cookie mutating request without X-Requested-With must be rejected with 403');
+
+  // Request WITH X-Requested-With header succeeds
+  const csrfAllowedRes = await fetch(`${baseUrl}/api/classrooms`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: `token=${tokenA}`,
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+    body: JSON.stringify({
+      name: 'Legitimate Classroom',
+      subject: 'Security',
+      department: 'CS',
+      section: 'A',
+      academicYear: '2026-2027',
+    }),
+  });
+
+  assert.equal(csrfAllowedRes.status, 201, 'Request with valid CSRF header must succeed');
+
+  ENV.NODE_ENV = originalEnv;
+});

@@ -1,74 +1,59 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { CheckCircle2, UserCheck, RefreshCw, AlertCircle } from 'lucide-react';
-import { useSound } from '../context/SoundContext';
+import { CheckCircle2, UserCheck, RefreshCw, AlertCircle, XCircle } from 'lucide-react';
 
 export const PollAnimationStage = ({
-  isPolling,
+  status = 'idle', // 'idle' | 'polling' | 'selected' | 'error' | 'cancelled'
+  isPolling = status === 'polling',
   selectedStudent,
   candidateStudents = [],
   error,
   onRetry,
+  onCancel,
   classroomName,
 }) => {
-  const { startPollingAudio, stopPollingAudio, playSuccessChime, playErrorSound } = useSound();
   const [cyclingStudent, setCyclingStudent] = useState(null);
-  const [animationPhase, setAnimationPhase] = useState('idle'); // 'idle' | 'shuffling' | 'revealed' | 'error'
   const timerRef = useRef(null);
+  const hasConfettiedRef = useRef(false);
 
-  // Guarantee clean shutdown on unmount
+  // Derive active visual phase
+  const effectivePhase = error
+    ? 'error'
+    : status === 'cancelled'
+    ? 'cancelled'
+    : isPolling || status === 'polling'
+    ? 'shuffling'
+    : selectedStudent || status === 'selected'
+    ? 'revealed'
+    : 'idle';
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopPollingAudio();
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [stopPollingAudio]);
+  }, []);
 
-  // Audio & Animation Lifecycle
+  // Visual shuffling cycle during polling phase
   useEffect(() => {
-    if (error) {
-      setAnimationPhase('error');
-      stopPollingAudio();
-      playErrorSound();
-      if (timerRef.current) clearTimeout(timerRef.current);
-      return;
-    }
-
-    if (isPolling) {
-      setAnimationPhase('shuffling');
-
-      // Start electronic startup tone + continuous suspense loop
-      startPollingAudio();
-
+    if (effectivePhase === 'shuffling') {
+      hasConfettiedRef.current = false;
       if (candidateStudents.length === 0) return;
 
-      let delay = 60; // Start fast
-      let elapsed = 0;
-      const minDuration = 2000;
+      let delay = 60; // Fast initial tick
       let currentIndex = 0;
 
       const runCycle = () => {
         currentIndex = (currentIndex + 1) % candidateStudents.length;
         setCyclingStudent(candidateStudents[currentIndex]);
 
-        elapsed += delay;
-        // Gradual deceleration to build suspense as we approach finish
-        if (elapsed > minDuration * 0.6) {
-          delay += 35;
-        } else if (elapsed > minDuration * 0.3) {
-          delay += 12;
+        // Gradual deceleration to simulate mechanical reel landing
+        if (delay < 180) {
+          delay += 10;
         }
 
-        // Keep shuffling if minimum suspense time has not elapsed OR if server result has not arrived yet
-        if (elapsed < minDuration || !selectedStudent) {
-          timerRef.current = setTimeout(runCycle, delay);
-        } else {
-          // Official selection confirmed! Transition smoothly into revealed phase
-          setAnimationPhase('revealed');
-          playSuccessChime(); // Immediately cuts suspense audio and plays confirmation chime
-          triggerTastefulConfetti();
-        }
+        timerRef.current = setTimeout(runCycle, delay);
       };
 
       timerRef.current = setTimeout(runCycle, delay);
@@ -76,14 +61,16 @@ export const PollAnimationStage = ({
       return () => {
         if (timerRef.current) clearTimeout(timerRef.current);
       };
-    } else if (selectedStudent && !isPolling) {
-      setAnimationPhase('revealed');
-      stopPollingAudio();
-    } else if (!isPolling && !selectedStudent) {
-      setAnimationPhase('idle');
-      stopPollingAudio();
+    } else if (effectivePhase === 'revealed' && selectedStudent) {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (!hasConfettiedRef.current) {
+        hasConfettiedRef.current = true;
+        triggerTastefulConfetti();
+      }
+    } else {
+      if (timerRef.current) clearTimeout(timerRef.current);
     }
-  }, [isPolling, selectedStudent, error, candidateStudents, startPollingAudio, stopPollingAudio, playSuccessChime, playErrorSound]);
+  }, [effectivePhase, candidateStudents, selectedStudent]);
 
   const triggerTastefulConfetti = () => {
     try {
@@ -95,7 +82,7 @@ export const PollAnimationStage = ({
         disableForReducedMotion: true,
       });
     } catch (e) {
-      // Ignore if confetti fails
+      // Ignore if confetti is blocked
     }
   };
 
@@ -114,16 +101,16 @@ export const PollAnimationStage = ({
       {/* Background Animated Atmosphere Glow */}
       <div
         className={`absolute inset-0 pointer-events-none transition-opacity duration-700 ${
-          animationPhase === 'shuffling'
+          effectivePhase === 'shuffling'
             ? 'opacity-100 bg-radial from-brand-500/20 via-transparent to-transparent'
-            : animationPhase === 'revealed'
+            : effectivePhase === 'revealed'
             ? 'opacity-80 bg-radial from-emerald-500/15 via-transparent to-transparent'
             : 'opacity-0'
         }`}
       />
 
       {/* Decorative Rotating Ring during Shuffle */}
-      {animationPhase === 'shuffling' && (
+      {effectivePhase === 'shuffling' && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <motion.div
             animate={{ rotate: 360 }}
@@ -139,7 +126,7 @@ export const PollAnimationStage = ({
       )}
 
       {/* ERROR STATE */}
-      {animationPhase === 'error' && (
+      {effectivePhase === 'error' && (
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -166,8 +153,36 @@ export const PollAnimationStage = ({
         </motion.div>
       )}
 
+      {/* CANCELLED STATE */}
+      {effectivePhase === 'cancelled' && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="text-center z-10 max-w-md p-6"
+        >
+          <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 mx-auto flex items-center justify-center mb-4">
+            <XCircle className="w-8 h-8" />
+          </div>
+          <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+            Selection Cancelled
+          </h3>
+          <p className="text-sm text-slate-600 dark:text-slate-400 mt-2 mb-6">
+            The student selection was cancelled. Click below to start a new draw.
+          </p>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 shadow-md shadow-brand-600/30 transition-all"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Start Selection</span>
+            </button>
+          )}
+        </motion.div>
+      )}
+
       {/* IDLE STATE */}
-      {animationPhase === 'idle' && (
+      {effectivePhase === 'idle' && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -186,7 +201,7 @@ export const PollAnimationStage = ({
       )}
 
       {/* SHUFFLING PHASE */}
-      {animationPhase === 'shuffling' && (
+      {effectivePhase === 'shuffling' && (
         <div className="relative z-10 flex flex-col items-center justify-center text-center w-full max-w-sm">
           <span className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-semibold bg-brand-500/10 text-brand-600 dark:text-brand-300 border border-brand-500/20 mb-6 animate-pulse">
             <span className="w-2 h-2 rounded-full bg-brand-500 animate-ping" />
@@ -217,7 +232,7 @@ export const PollAnimationStage = ({
       )}
 
       {/* FINAL REVEALED PHASE */}
-      {animationPhase === 'revealed' && selectedStudent && (
+      {effectivePhase === 'revealed' && selectedStudent && (
         <motion.div
           initial={{ opacity: 0, scale: 0.88, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}

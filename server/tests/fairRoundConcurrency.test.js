@@ -156,3 +156,112 @@ test('Fair Round Concurrency - simultaneous requests cannot select the same stud
   assert.equal(resetData.round.remainingCount, 5);
   assert.equal(resetData.round.selectedCount, 0);
 });
+
+test('Fair Round Concurrency - excess concurrent requests handle exhaustion cleanly', async () => {
+  const classroomId = classroomDoc._id.toString();
+
+  // Pick 3 students sequentially, leaving only 2 in the pool of 5
+  await fetch(`${baseUrl}/api/classrooms/${classroomId}/selection/draw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify({ mode: 'fair_round' }),
+  });
+  await fetch(`${baseUrl}/api/classrooms/${classroomId}/selection/draw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify({ mode: 'fair_round' }),
+  });
+  await fetch(`${baseUrl}/api/classrooms/${classroomId}/selection/draw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify({ mode: 'fair_round' }),
+  });
+
+  // Now 2 students remain. Fire 6 concurrent requests!
+  const requests = Array.from({ length: 6 }, () =>
+    fetch(`${baseUrl}/api/classrooms/${classroomId}/selection/draw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ mode: 'fair_round' }),
+    })
+  );
+
+  const responses = await Promise.all(requests);
+  const data = await Promise.all(responses.map((r) => r.json()));
+
+  const successResponses = data.filter((d) => d.success);
+  const exhaustedResponses = data.filter((d) => !d.success && d.isRoundCompleted);
+
+  // Exactly 2 must succeed, and the remaining 4 must return round completed
+  assert.equal(successResponses.length, 2, 'Exactly 2 remaining students should be claimed');
+  assert.equal(exhaustedResponses.length, 4, '4 excess concurrent requests must receive round completed');
+
+  // Verify the 2 claimed students are distinct
+  const claimedIds = successResponses.map((r) => r.selectedStudent.id);
+  assert.equal(new Set(claimedIds).size, 2, 'Claimed students must be unique');
+});
+
+test('Multi-Tenant Concurrency - parallel draws across separate faculty classrooms do not interfere', async () => {
+  // Create Faculty B and Classroom B
+  const facultyB = await Faculty.create({
+    name: 'Dr. Concurrency B',
+    email: `concurrency_b_${Date.now()}@college.edu`,
+    password: 'Password123!',
+    department: 'Physics',
+  });
+  const tokenB = jwt.sign({ id: facultyB._id }, ENV.JWT_SECRET, { expiresIn: '1h' });
+
+  const classroomB = await Classroom.create({
+    name: 'PHY201 Quantum Mechanics',
+    subject: 'Physics',
+    department: 'Physics',
+    section: 'B',
+    faculty: facultyB._id,
+    academicYear: '2026-2027',
+  });
+
+  const studentsB = [];
+  for (let i = 0; i < 3; i++) {
+    const s = await Student.create({
+      fullName: `Physics Student ${i + 1}`,
+      rollNumber: `PHY26-00${i + 1}`,
+      classroom: classroomB._id,
+      faculty: facultyB._id,
+      isActive: true,
+    });
+    studentsB.push(s);
+  }
+
+  // Reset Classroom A for clean test
+  await fetch(`${baseUrl}/api/classrooms/${classroomDoc._id}/selection/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+  });
+
+  // Launch simultaneous draws on Classroom A and Classroom B
+  const [resA, resB] = await Promise.all([
+    fetch(`${baseUrl}/api/classrooms/${classroomDoc._id}/selection/draw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ mode: 'fair_round' }),
+    }),
+    fetch(`${baseUrl}/api/classrooms/${classroomB._id}/selection/draw`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenB}` },
+      body: JSON.stringify({ mode: 'fair_round' }),
+    }),
+  ]);
+
+  const [dataA, dataB] = await Promise.all([resA.json(), resB.json()]);
+
+  assert.equal(resA.status, 200);
+  assert.equal(resB.status, 200);
+
+  // Classroom A picked from Classroom A's students, not B's
+  const validIdsA = studentDocs.map((s) => s._id.toString());
+  const validIdsB = studentsB.map((s) => s._id.toString());
+
+  assert.ok(validIdsA.includes(dataA.selectedStudent.id));
+  assert.ok(validIdsB.includes(dataB.selectedStudent.id));
+  assert.notEqual(dataA.selectedStudent.id, dataB.selectedStudent.id);
+});

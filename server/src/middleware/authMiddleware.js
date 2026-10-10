@@ -59,13 +59,18 @@ export const verifyCsrf = (req, res, next) => {
     return next();
   }
 
-  // If using cookies, require custom header
+  // If no ambient session cookie is present (e.g. login, register, unauthenticated), CSRF is not applicable
+  if (!req.cookies || !req.cookies.token) {
+    return next();
+  }
+
+  // If using cookies for state-changing operations, require custom application header
   const requestedWith = req.headers['x-requested-with'];
   if (requestedWith === 'XMLHttpRequest') {
     return next();
   }
 
-  // Permit test runner without header
+  // Permit test runner in test mode
   if (ENV.NODE_ENV === 'test') {
     return next();
   }
